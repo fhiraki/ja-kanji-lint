@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Files created by this tool
+*.bak-ja-kanji-lint
+.ja-kanji-lint-*.tmp
+
+# Local tool settings
+.claude/
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
