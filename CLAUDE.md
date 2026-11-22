@@ -19,7 +19,7 @@ python3 ja_kanji_lint.py testdata
 python3 ja_kanji_lint.py testdata --diff
 
 # Exercise one function (-B avoids leaving __pycache__ in the repo)
-python3 -B -c "import ja_kanji_lint as f; print(f.scan_text('关门と西澤'))"
+python3 -B -c "import ja_kanji_lint as f; print(f.scan_text('关门と手机'))"
 ```
 
 `selftest()` cannot run individual cases. To check one behavior, call the function directly as above.
@@ -44,7 +44,7 @@ python3 -B -c "import ja_kanji_lint as f; print(f.scan_text('关门と西澤'))"
 **Character tables.**
 - `_MAP_SRC` builds `MAP`, the auto-fixed one-to-one pairs.
 - `_REVIEW_SRC` and the literal entries form `AMBIGUOUS`, which is report-only, for characters with several candidates or valid Japanese uses (names, old forms).
-- `_CHINESE_WORDS` and `_JAPANESE_WORDS` narrow `AMBIGUOUS` by context in `is_ambiguous_use`. Common Japanese kanji such as 机 and 据 are reported only inside listed Chinese words. Japanese words are checked first, so 回数据え置き is not read as 数据 and 若干部分 is not read as 干部.
+- `_CHINESE_WORDS` and `_JAPANESE_WORDS` narrow `AMBIGUOUS` by context in `is_ambiguous_use`. Common Japanese kanji such as 机 and 据, and old forms common in names such as 澤 and 國, are reported only inside listed Chinese words. Do not list words that can also be names, such as 光榮 or 廣義. Japanese words are checked first, so 回数据え置き is not read as 数据 and 若干部分 is not read as 干部.
 - `SUSPICIOUS` is report-only, for Chinese function characters.
 - `is_simplified_only` also reports characters that are in GB2312 but in neither JIS X 0208/0213 nor Big5.
 

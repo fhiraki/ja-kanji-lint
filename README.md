@@ -52,10 +52,10 @@ If you do not read Japanese, have a Japanese speaker confirm `ambiguous` finding
 | Kind (`--fail-on` name) | Examples | `--fix` |
 |---|---|---|
 | Fix candidate (`fix`) | `关→関` `质→質` `说→説` | Fixed |
-| Needs review (`ambiguous`) | `发→発/髪` `國→国` `手机` | Report only |
+| Needs review (`ambiguous`) | `发→発/髪` `學→学` `手机` | Report only |
 | Chinese-only (`suspicious`) | `们` `这` `账` | Report only |
 | Word typo (`word`) | `後程→後ほど` | Fixed with `--fix-words` |
-| Repeated punctuation (`dup`) | `。。` `、、` `、。` | Fixed |
+| Repeated punctuation (`dup`) | `。。` `、、` `、。` (three or more in a row, such as `。。。`, are left alone) | Fixed |
 | Repeated particle (`particle`) | `のの` `をを` | Report only |
 | Unbalanced brackets (`bracket`) | `「` without `」` (documents only) | Report only |
 | Character width (`width`) | `ＡＢＣ１２３` `ｶﾀｶﾅ` | Reported and fixed with `--width` |
@@ -68,6 +68,7 @@ A common tip is to save a file as Shift-JIS and treat garbled characters as non-
 - **Chinese-only** means the character is in the mainland Chinese set (GB2312) and in neither the Japanese sets (JIS X 0208/0213) nor the Taiwanese set (Big5).
 - **Auto-fix never touches** a character that Shift-JIS can represent, or one found in both the Japanese and Taiwanese sets. Old forms used in names, such as `國` `實` `澤`, and terms such as `骨粗鬆症` stay as written.
 - **Common Japanese kanji** such as `机` `干` `据` are reported only inside Chinese words such as `手机` `干净` `数据`. Japanese words such as `机上` `若干` `据え置き` are not reported.
+- **Old forms common in names** such as `澤` `廣` `與` `國` are reported only inside Chinese words such as `毛澤東` `廣告` `參與` `中國`, so names such as `西澤` and `廣瀬` are not reported. Chinese words outside the built-in list can be missed.
 - **Characters shared by Japanese and Chinese**, such as `学` `区` `声`, are not reported.
 
 ### Options
@@ -82,7 +83,7 @@ A common tip is to save a file as Shift-JIS and treat garbled characters as non-
 | `--no-typos` | Turn off word, punctuation, particle, and bracket checks and their fixes |
 | `--punct` | Also handle the Chinese comma (`，→、`) |
 | `--l10n` | Scan the values in translation files |
-| `--ignore-chars CHARS` | Never report or fix these characters, for example `--ignore-chars 澤廣櫻` |
+| `--ignore-chars CHARS` | Never report or fix these characters, for example `--ignore-chars 學體` |
 | `--fail-on KINDS` | Exit 1 only for these comma-separated kinds, for example `fix,suspicious` |
 | `--json` | Print JSON to stdout, with diffs and backup notices on stderr |
 | `--include-strings` | Scan whole code lines, including string literals |
@@ -115,7 +116,7 @@ Exit codes are `0` for no findings, `1` for findings, and `2` for errors such as
   run: python3 path/to/ja_kanji_lint.py . --fail-on fix,suspicious
 ```
 
-`--fail-on` keeps report-only findings, such as old-form names like `澤田`, from failing the build. Use `--ignore-chars` to silence specific characters.
+`--fail-on` keeps report-only findings, such as old forms like `學`, from failing the build. Use `--ignore-chars` to silence specific characters.
 
 ### Extending the tables
 
@@ -197,10 +198,10 @@ python3 ja_kanji_lint.py locales/ja --l10n
 | 種別(`--fail-on` の名前) | 例 | `--fix` |
 |---|---|---|
 | 修正候補(`fix`) | `关→関` `质→質` `说→説` | 修正する |
-| 要確認(`ambiguous`) | `发→発/髪` `國→国` `手机` | 報告のみ |
+| 要確認(`ambiguous`) | `发→発/髪` `學→学` `手机` | 報告のみ |
 | 中華圏専用字(`suspicious`) | `们` `这` `账` | 報告のみ |
 | 誤字候補(`word`) | `後程→後ほど` | `--fix-words` で修正 |
-| 重複記号(`dup`) | `。。` `、、` `、。` | 修正する |
+| 重複記号(`dup`) | `。。` `、、` `、。`(`。。。` など3個以上の連続は対象外) | 修正する |
 | 助詞重複(`particle`) | `のの` `をを` | 報告のみ |
 | 括弧不一致(`bracket`) | `「` と `」` の個数不一致(ドキュメントのみ) | 報告のみ |
 | 全角/半角(`width`) | `ＡＢＣ１２３` `ｶﾀｶﾅ` | `--width` で報告・修正 |
@@ -213,6 +214,7 @@ python3 ja_kanji_lint.py locales/ja --l10n
 - **中華圏専用字**は、中国本土の文字集合(GB2312)にあり、日本語(JIS X 0208/0213)にも台湾(Big5)にもない字に限定しています。
 - **自動修正の対象外**は、Shift-JIS で表せる字と、日本語・台湾の両方の文字集合にある字です。人名に使われる `國` `實` `澤` などの旧字体や、`骨粗鬆症` のような用語は書き換えません。
 - **日本語で日常的に使う字**(`机` `干` `据` など)は、`手机` `干净` `数据` のような中国語の語に含まれるときだけ報告します。`机上` `若干` `据え置き` のような日本語は報告しません。
+- **人名に多い旧字体**(`澤` `廣` `與` `國` など)は、`毛澤東` `廣告` `參與` `中國` のような中国語の語に含まれるときだけ報告するので、`西澤` や `廣瀬` は報告しません。登録されていない中国語の語は見逃すことがあります。
 - **日中共通の字**(`学` `区` `声` など)は検出しません。
 
 ### オプション
@@ -227,7 +229,7 @@ python3 ja_kanji_lint.py locales/ja --l10n
 | `--no-typos` | 誤字・重複記号・助詞重複・括弧不一致の検出と修正を無効にする |
 | `--punct` | 中国語の読点(`，→、`)も対象にする |
 | `--l10n` | 翻訳ファイルの値を走査する |
-| `--ignore-chars CHARS` | 指定した字を検出・修正しない(例: `--ignore-chars 澤廣櫻`) |
+| `--ignore-chars CHARS` | 指定した字を検出・修正しない(例: `--ignore-chars 學體`) |
 | `--fail-on KINDS` | 指定した種別(カンマ区切り)のときだけ終了コード 1 にする(例: `fix,suspicious`) |
 | `--json` | JSON を標準出力に出す(diff とバックアップ通知は標準エラー出力) |
 | `--include-strings` | コード行全体(文字列リテラルを含む)を走査する |
@@ -260,7 +262,7 @@ python3 ja_kanji_lint.py locales/ja --l10n
   run: python3 path/to/ja_kanji_lint.py . --fail-on fix,suspicious
 ```
 
-`--fail-on` を使うと、`澤田` のような旧字体の人名など、報告のみの結果でビルドが失敗しなくなります。特定の字を除外するには `--ignore-chars` を使います。
+`--fail-on` を使うと、`學` のような旧字体など、報告のみの結果でビルドが失敗しなくなります。特定の字を除外するには `--ignore-chars` を使います。
 
 ### 辞書の拡張
 

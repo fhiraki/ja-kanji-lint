@@ -152,6 +152,37 @@ _CHINESE_WORDS = {ch: words.split() for ch, words in {
     "涌": "涌现 涌入 涌动 汹涌 喷涌",
     "裡": "這裡 那裡 哪裡 裡面 裡頭",
     "註": "註冊 註明 備註 註銷",
+    # 人名に多い旧字体。語の一部が名前と重なりやすいもの(光榮, 廣義, 壯大 など)は載せない
+    "澤": "毛澤東 色澤",
+    "廣": "廣告 廣播 廣泛 廣場 廣闊 推廣 寬廣 廣東 廣州",
+    "櫻": "櫻花 櫻桃",
+    "圓": "圓形 圓滿 圓周 圓滑 團圓 圓圈 圓桌 橢圓",
+    "邊": "周邊 近邊 旁邊 這邊 那邊 左邊 右邊 身邊 兩邊 一邊 裡邊 外邊 邊緣 邊界 邊框",
+    "與": "參與 與其 與此 與會",
+    "國": "中國 美國 英國 法國 德國 韓國 泰國 國家 國際 國內 國外 全國 各國 外國",
+    "實": "實現 實際 實驗 實在 實施 實用 事實 確實 現實 其實 證實",
+    "榮": "榮譽 繁榮 榮耀 虛榮",
+    "遙": "遙遠 遙控 遙感 逍遙",
+    "淺": "淺顯 深淺 膚淺 淺色",
+    "寶": "寶貝 寶藏 寶石 珍寶",
+    "豐": "豐富 豐收",
+    "條": "條件 條款 條例 這條 那條 線條",
+    "團": "團隊 集團 團體 社團",
+    "關": "關於 關係 關鍵 相關 有關 關閉 開關 機關",
+    "鐵": "鐵路 地鐵 鋼鐵 高鐵",
+    "禮": "禮物 禮貌 婚禮 典禮",
+    "靜": "安靜 平靜 動靜 冷靜 靜態",
+    "兒": "兒童 兒子 女兒 嬰兒 這兒 那兒",
+    "龜": "烏龜",
+    "賴": "依賴 信賴 賴以",
+    "雙": "雙方 雙重 雙手 一雙",
+    "繪": "繪製 繪畫 描繪",
+    "壯": "強壯 悲壯",
+    "勳": "功勳 勳章",
+    "恆": "永恆 恆星 恆定",
+    "凉": "凉快 凉爽",
+    "瀨": "",
+    "筱": "",
 }.items()}
 
 # 日本語の語に含まれるときは報告しない。「回数据え置き」の「数据」や
@@ -165,6 +196,7 @@ _JAPANESE_WORDS = {ch: words.split() for ch, words in {
     "后": "皇后 太后 王后 后妃 后宮 母后 天后 立后 后土",
     "并": "并河",
     "冲": "冲方",
+    "國": "田中國 山中國 竹中國 畑中國 野中國 國分",
 }.items()}
 
 # 日本語の常用では使われない中華圏専用の字(報告のみ・自動修正なし)
@@ -192,11 +224,12 @@ TYPO_WORDS = {
 # ※ 「ものの」を除外するため、直前が「も」ののの は対象外。
 _PARTICLE_DUP_RE = re.compile(r"((?<!も)のの|がが|をを|にに|へへ)")
 
-# 重複句読点は誤入力として自動修正(--fix 時に適用)
+# 重複句読点は誤入力として自動修正(--fix 時に適用)。
+# 3個以上の「。。。」「、、、」は三点リーダー代わりの表現なので対象にしない。
 _DUP_PUNCT = [
-    (re.compile(r"。。+"), "。"),
-    (re.compile(r"、、+"), "、"),
-    (re.compile(r"、。"), "。"),
+    (re.compile(r"(?<!。)。。(?!。)"), "。"),
+    (re.compile(r"(?<!、)、、(?!、)"), "、"),
+    (re.compile(r"(?<!、)、。(?!。)"), "。"),
 ]
 
 # 半角カナ → 全角カナ(濁点・半濁点は直後の ﾞ/ﾟ と結合)
@@ -1470,10 +1503,31 @@ def selftest():
         print("FAIL: アポストロフィ行: %r" % (spans,))
 
     # 旧字体(人名に使われうる字)は AMBIGUOUS で自動修正しない
-    got = scan_text("西澤さん", False)
-    if [k for _i, k, _s, _d in got] != ["ambiguous"]:
-        ok = False
-        print("FAIL: 旧字体の扱い: %r" % (got,))
+    for word in ("西澤さん", "新澤菜央", "廣瀬聖七", "與儀ケイラ", "櫻坂46", "岸田國士",
+                 "貞野遙香", "渡邊", "田中國男", "國分", "圓谷", "北條", "團伊玖磨",
+                 "關根", "靜香", "兒玉", "瀨戸", "光榮"):
+        got = scan_text(word, False)
+        if got:
+            ok = False
+            print("FAIL: 人名の旧字体を報告: %s %r" % (word, got))
+    for word, ch in (("近邊波面", "邊"), ("周邊", "邊"), ("廣告", "廣"), ("毛澤東", "澤"),
+                     ("中國", "國"), ("實現", "實"), ("關於", "關")):
+        if ch not in [s for _i, k, s, _d in scan_text(word, False)
+                      if k == "ambiguous"]:
+            ok = False
+            print("FAIL: 中国語の旧字体を見逃した: %s" % word)
+
+    # 3個以上の句読点は意図した表現として検出も修正もしない
+    a = argparse.Namespace(fix_words=False, punct=False, width=False,
+                           no_typos=False)
+    for text in ("お待ちください。。。", "あの、、、", "えっと、、、。", "ただ、。。"):
+        if scan_dup_punct(text) != [] and text != "ただ、。。":
+            ok = False
+            print("FAIL: 3個以上の句読点を報告: %s" % text)
+    for text in ("お待ちください。。。", "あの、、、", "えっと、、、。"):
+        if fix_region(text, a) != text:
+            ok = False
+            print("FAIL: 3個以上の句読点を修正: %s" % text)
 
     # 誤字辞書・重複記号・表記ゆれ
     got = scan_words("後程お送りします")
@@ -1651,9 +1705,9 @@ def selftest():
         check("--l10n なしの .po", run("n.po", 'msgstr "关门"\n')[0], 0)
 
         # CI で正当な日本語を許容できる
-        check("既定の終了コード", run("o.md", "國の上\n")[0], 1)
-        check("--fail-on", run("p.md", "國の上\n", "--fail-on", "fix")[0], 0)
-        check("--ignore-chars", run("q.md", "國の上\n", "--ignore-chars", "國")[0],
+        check("既定の終了コード", run("o.md", "學の上\n")[0], 1)
+        check("--fail-on", run("p.md", "學の上\n", "--fail-on", "fix")[0], 0)
+        check("--ignore-chars", run("q.md", "學の上\n", "--ignore-chars", "學")[0],
               0)
         check("--ignore-chars の修正除外", run(
             "r.md", "关门\n", "--ignore-chars", "关", "--fix")[1], "关門\n")
@@ -1781,7 +1835,7 @@ def main(argv=None):
                          ".resx .ftl .yml など)の値を走査する")
     ap.add_argument("--ignore-chars", metavar="CHARS", default="",
                     help="検出・修正しない文字を並べて指定する"
-                         "(例: --ignore-chars 澤廣櫻)")
+                         "(例: --ignore-chars 學體)")
     ap.add_argument("--fail-on", metavar="KINDS", default=None,
                     help="終了コード 1 にする種別をカンマ区切りで指定する"
                          "(例: fix,suspicious。既定は全種別)")
