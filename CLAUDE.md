@@ -24,12 +24,14 @@ python3 -B -c "import ja_kanji_lint as f; print(f.scan_text('关门と西澤'))"
 
 `selftest()` cannot run individual cases. To check one behavior, call the function directly as above.
 
-- Scanning `.` from the repo root reports the README and fixtures, which contain Chinese characters on purpose. `iter_files` skips only the script itself.
+- Scanning `.` from the repo root reports the README and fixtures, which contain Chinese characters on purpose. In a directory walk, `iter_files` skips the script itself, `DEFAULT_EXCLUDES`, and Git-ignored paths.
 - Do not run `--fix` on `testdata/`. The fixtures contain errors on purpose, so copy them elsewhere first.
 
 ## Architecture
 
 `main()` runs a linear pipeline: `iter_files` → `FileScanner.classify` → `FileScanner.scan` → report → `print_diff` / `apply_fix`.
+
+**Git integration.** `git_ignored_paths` calls `git ls-files` once per repository. Scanned repositories are untrusted, so every call must keep `core.fsmonitor=false`, because that setting can run arbitrary commands. It also clears `GIT_*` variables so the tool works inside Git hooks. Paths are compared through `_path_key` because macOS Git returns NFC names while the filesystem can return NFD.
 
 **Scan regions.** `scan` computes per-line column spans, and all detection and fixing happens only inside them. Documents use whole lines. Code uses `iter_comment_spans` after `mask_multiline_strings` blanks multi-line strings, unless `--include-strings` selects whole lines. With `--l10n`, translation files use `locale_value_spans`, which excludes keys. `classify` checks `DOC_EXTS` before `EXT_LANG`, so an extension in both (`.tex`) or added through `--ext` is scanned as a whole document, even a code extension like `.py`. `protected_spans` removes URLs, Markdown code and link targets, HTML `href`/`src`, and JSON keys from fixing, but they are still reported.
 
@@ -41,7 +43,8 @@ python3 -B -c "import ja_kanji_lint as f; print(f.scan_text('关门と西澤'))"
 
 **Character tables.**
 - `_MAP_SRC` builds `MAP`, the auto-fixed one-to-one pairs.
-- `_REVIEW_SRC` and the literal entries form `AMBIGUOUS`, which is report-only, for characters with several candidates or valid Japanese uses (names, old forms, 几帳面, 据え置き).
+- `_REVIEW_SRC` and the literal entries form `AMBIGUOUS`, which is report-only, for characters with several candidates or valid Japanese uses (names, old forms).
+- `_CHINESE_WORDS` and `_JAPANESE_WORDS` narrow `AMBIGUOUS` by context in `is_ambiguous_use`. Common Japanese kanji such as 机 and 据 are reported only inside listed Chinese words. Japanese words are checked first, so 回数据え置き is not read as 数据 and 若干部分 is not read as 干部.
 - `SUSPICIOUS` is report-only, for Chinese function characters.
 - `is_simplified_only` also reports characters that are in GB2312 but in neither JIS X 0208/0213 nor Big5.
 

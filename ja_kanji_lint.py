@@ -35,8 +35,10 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
+import unicodedata
 from collections import namedtuple
 
 # ---------------------------------------------------------------------------
@@ -98,8 +100,8 @@ _REVIEW_SRC = """
 峽:峡 恆:恒 勞:労 勵:励 勳:勲 單:単 圍:囲 壓:圧 壯:壮 榮:栄
 樂:楽 權:権 歐:欧 沒:没 淨:浄 營:営 獨:独 譽:誉 灣:湾 橫:横
 獸:獣 舊:旧 獻:献 隨:随 雜:雑 黨:党 齒:歯 禮:礼 靈:霊 豐:豊
-寶:宝 聽:聴 驗:験 檢:検 兩:両 帶:帯 龜:亀 裡:裏 蹟:跡 獵:猟
-賴:頼 錢:銭 雙:双 濟:済 樓:楼 烟:煙 氣:気 瀨:瀬 桧:檜 筱:篠
+寶:宝 聽:聴 驗:験 檢:検 兩:両 帶:帯 龜:亀 裡:裏 獵:猟
+賴:頼 錢:銭 雙:双 濟:済 樓:楼 烟:煙 氣:気 瀨:瀬 筱:篠
 遙:遥 适:適 愿:願 惊:驚 晚:晩 极:極 构:構 气:気 泛:汎 确:確
 离:離 种:種 网:網 荐:薦 宁:寧 异:異 儿:児 溫:温 緣:縁 歷:歴
 醬:醤 雞:鶏 錄:録 价:価 步:歩 戾:戻 壳:殻 广:広 梦:夢 决:決
@@ -131,6 +133,39 @@ AMBIGUOUS = {
     "迹": ["跡"],         # 迹部 など固有名詞に使用
     "于": ["於"],         # 人名用漢字(于保 など)。中国語の前置詞「于」と同形
 }
+
+# 日本語で日常的に使う字は単独では報告せず、中国語の語に含まれるときだけ報告する。
+_CHINESE_WORDS = {ch: words.split() for ch, words in {
+    "机": "手机 飞机 司机 相机 耳机 主机 电机 计算机 打印机 发动机 虚拟机 洗衣机 "
+          "录音机 机器 机会 机制 机构 机场 机械 机关 机密 机能 机动 机遇 机票 "
+          "机型 机房 机组 机翻 危机 时机 动机 契机 转机 商机 有机 无机 死机 开机 "
+          "关机 待机 登机 停机",
+    "干": "干净 干活 干嘛 干吗 干什么 干掉 干脆 干扰 干预 干燥 干杯 干部 干事 "
+          "干旱 干涉 树干 饼干",
+    "据": "数据 根据 依据 证据 据说 据此 据悉 据称 占据 票据 收据 字据 论据 "
+          "凭据 单据",
+    "几": "几个 几乎 几何 几天 几年 几次 几种 几点 几分 几位 几十 几百 几千 "
+          "好几 这几 那几 茶几",
+    "于": "关于 对于 由于 属于 基于 等于 位于 至于 用于 终于 处于 在于 大于 "
+          "小于 便于 易于 鉴于 于是 过于 敢于 善于 趋于 归于 源于",
+    "迹": "痕迹 奇迹 足迹 轨迹 踪迹 笔迹 遗迹 事迹 迹象 血迹 古迹 手迹",
+    "涌": "涌现 涌入 涌动 汹涌 喷涌",
+    "裡": "這裡 那裡 哪裡 裡面 裡頭",
+    "註": "註冊 註明 備註 註銷",
+}.items()}
+
+# 日本語の語に含まれるときは報告しない。「回数据え置き」の「数据」や
+# 「若干部分」の「干部」のように、語の境界で中国語の語と重なる誤判定も防ぐ。
+_JAPANESE_WORDS = {ch: words.split() for ch, words in {
+    "干": "若干 干渉",
+    "据": "据え 据わ 据付 据置",
+    "几": "几帳 床几",
+    "于": "于保",
+    "迹": "垂迹 迹部",
+    "后": "皇后 太后 王后 后妃 后宮 母后 天后 立后 后土",
+    "并": "并河",
+    "冲": "冲方",
+}.items()}
 
 # 日本語の常用では使われない中華圏専用の字(報告のみ・自動修正なし)
 SUSPICIOUS = set(
@@ -247,6 +282,12 @@ _OVERLAPS = set(MAP) & (set(AMBIGUOUS) | SUSPICIOUS)
 if _OVERLAPS:
     raise ValueError("MAP と AMBIGUOUS/SUSPICIOUS の二重登録: %r"
                      % sorted(_OVERLAPS))
+
+# 文脈判定の語は、対象の字を含み、その字が AMBIGUOUS にあること
+for _table in (_CHINESE_WORDS, _JAPANESE_WORDS):
+    for _ch, _words in _table.items():
+        if _ch not in AMBIGUOUS or any(_ch not in w for w in _words):
+            raise ValueError("文脈判定の語が不正です: %r" % _ch)
 
 # Shift-JIS(cp932)で表せる字と、日本語・台湾の両方の文字集合にある字は、
 # 日本語として正当な用法がありうる。自動修正すると本来の表記を壊すため、
@@ -796,6 +837,27 @@ def is_simplified_only(ch):
             and not _in_taiwan_charset(ch))
 
 
+def _word_at(text, idx, words):
+    """text[idx] の字を含む形で words のいずれかが出現しているか。"""
+    ch = text[idx]
+    for word in words:
+        offset = word.find(ch)
+        while offset != -1:
+            if idx >= offset and text.startswith(word, idx - offset):
+                return True
+            offset = word.find(ch, offset + 1)
+    return False
+
+
+def is_ambiguous_use(text, idx):
+    """AMBIGUOUS の字を、この文脈で「要確認」として報告すべきか。"""
+    ch = text[idx]
+    if _word_at(text, idx, _JAPANESE_WORDS.get(ch, ())):
+        return False
+    words = _CHINESE_WORDS.get(ch)
+    return words is None or _word_at(text, idx, words)
+
+
 def scan_text(text, fix_punct=False):
     """1テキスト断片中の検出結果 [(位置, 種別, 原字, 候補)] を返す。"""
     out = []
@@ -803,7 +865,8 @@ def scan_text(text, fix_punct=False):
         if ch in MAP:
             out.append((idx, "fix", ch, MAP[ch]))
         elif ch in AMBIGUOUS:
-            out.append((idx, "ambiguous", ch, AMBIGUOUS[ch]))
+            if is_ambiguous_use(text, idx):
+                out.append((idx, "ambiguous", ch, AMBIGUOUS[ch]))
         elif ch in SUSPICIOUS or ("一" <= ch <= "鿿"
                                   and is_simplified_only(ch)):
             out.append((idx, "suspicious", ch, None))
@@ -1206,11 +1269,59 @@ def apply_fix(path, fixed_lines, do_backup, encoding, stream=None):
         raise
 
 
-def iter_files(paths, extra_excludes, missing, tool_path=None):
+def _git_env():
+    """親プロセスの GIT_DIR などに影響されない環境変数を返す(Git フック内の実行対策)。"""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    return env
+
+
+def _path_key(path):
+    """パス比較用のキー。macOS では Git が NFC、OS が NFD の名前を返すことがある。"""
+    return unicodedata.normalize("NFC",
+                                 os.path.normcase(os.path.abspath(path)))
+
+
+def _inside_git_repo(directory):
+    cur = os.path.abspath(directory)
+    while True:
+        if os.path.exists(os.path.join(cur, ".git")):
+            return True
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return False
+        cur = parent
+
+
+def git_ignored_paths(directory):
+    """directory 配下で Git が無視するパスのキー集合を返す。Git 管理外なら空集合。
+
+    走査対象のリポジトリは信頼できるとは限らない。core.fsmonitor はリポジトリの
+    設定から任意のコマンドを実行できるため、必ず無効化して呼び出す。
+    """
+    cmd = ["git", "-c", "core.fsmonitor=false", "-C", directory, "ls-files",
+           "-z", "--others", "--ignored", "--exclude-standard", "--directory"]
+    try:
+        proc = subprocess.run(cmd, stdin=subprocess.DEVNULL,
+                              capture_output=True, env=_git_env(), timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        proc = None
+    if proc is None or proc.returncode != 0:
+        if _inside_git_repo(directory):
+            print("警告: Git を実行できないため .gitignore を適用できません: %s"
+                  % directory, file=sys.stderr)
+        return set()
+    return {_path_key(os.path.join(directory, os.fsdecode(p)))
+            for p in proc.stdout.split(b"\0") if p}
+
+
+def iter_files(paths, extra_excludes, missing, tool_path=None,
+               use_gitignore=True):
     """走査対象ファイルを列挙する。存在しないパスは missing に追記する。
 
-    ディレクトリ走査ではツール本体のファイルだけを除外する。プロジェクト直下に
-    置かれた場合でも、同じディレクトリの他のファイルは走査する。
+    ディレクトリ走査ではツール本体と Git の無視対象を除外する。プロジェクト直下に
+    置かれた場合でも、同じディレクトリの他のファイルは走査する。直接指定された
+    ファイルやディレクトリは、無視対象でも走査する。
     """
     excludes = set(DEFAULT_EXCLUDES) | set(extra_excludes or [])
     tool = os.path.realpath(tool_path or __file__)
@@ -1222,10 +1333,19 @@ def iter_files(paths, extra_excludes, missing, tool_path=None):
             missing.append(p)
             print("警告: 存在しないパス: %s" % p, file=sys.stderr)
             continue
+        ignored = git_ignored_paths(p) if use_gitignore else set()
         for root, dirs, files in os.walk(p):
-            dirs[:] = sorted(d for d in dirs if d not in excludes)
+            # 入れ子のリポジトリ(サブモジュールなど)には、その .gitignore も適用する
+            if use_gitignore and root != p \
+                    and (".git" in dirs or ".git" in files):
+                ignored |= git_ignored_paths(root)
+            dirs[:] = sorted(
+                d for d in dirs if d not in excludes
+                and not (ignored and _path_key(os.path.join(root, d)) in ignored))
             for name in sorted(files):
                 full = os.path.join(root, name)
+                if ignored and _path_key(full) in ignored:
+                    continue
                 if name == os.path.basename(tool) \
                         and os.path.realpath(full) == tool:
                     continue
@@ -1235,6 +1355,72 @@ def iter_files(paths, extra_excludes, missing, tool_path=None):
 # ---------------------------------------------------------------------------
 # 5. selftest
 # ---------------------------------------------------------------------------
+
+def _selftest_gitignore():
+    """.gitignore 関連のテスト。Git が使えない環境では省略する。"""
+    if not shutil.which("git"):
+        print("SKIP: git が無いため .gitignore のテストを省略")
+        return True
+    ok = True
+
+    def check(label, got, expected):
+        nonlocal ok
+        if got != expected:
+            ok = False
+            print("FAIL: %s: %r" % (label, got))
+
+    with tempfile.TemporaryDirectory() as d:
+        def git(*cmd, cwd=d):
+            return subprocess.run(["git", "-C", cwd, *cmd],
+                                  stdin=subprocess.DEVNULL, capture_output=True,
+                                  env=_git_env()).returncode
+
+        def write(rel, text="关门\n"):
+            p = os.path.join(d, rel)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as h:
+                h.write(text)
+            return p
+
+        def names(paths, **kwargs):
+            return sorted(os.path.relpath(x, d).replace(os.sep, "/")
+                          for x in iter_files(paths, [], [], **kwargs))
+
+        if git("init", "-q") != 0:
+            print("SKIP: git init に失敗したため .gitignore のテストを省略")
+            return True
+        for rel in ("src/keep.md", "generated/sub/a.md", "ignored.md",
+                    "tracked.md", "nested/keep.md", "nested/gen/a.md",
+                    unicodedata.normalize("NFD", "ガイド.ignored.md")):
+            write(rel)
+        write(".gitignore", "generated/\nignored.md\ntracked.md\n*.ignored.md\n")
+        git("add", "-f", "tracked.md")
+        git("init", "-q", cwd=os.path.join(d, "nested"))
+        write("nested/.gitignore", "gen/\n")
+
+        # 無視対象を除外する。追跡済みファイルは無視パターンに一致しても残す
+        check(".gitignore の適用", names([d]),
+              [".gitignore", "nested/.gitignore", "nested/keep.md",
+               "src/keep.md", "tracked.md"])
+        everything = set(names([d], use_gitignore=False))
+        check("--no-gitignore 相当",
+              {"generated/sub/a.md", "ignored.md", "nested/gen/a.md"}
+              <= everything, True)
+        # 直接指定されたパスは無視対象でも走査する
+        check("無視ディレクトリの直接指定",
+              names([os.path.join(d, "generated")]), ["generated/sub/a.md"])
+        check("無視ファイルの直接指定",
+              names([os.path.join(d, "ignored.md")]), ["ignored.md"])
+        # 走査対象のリポジトリ設定にあるコマンドを実行しない
+        if os.name == "posix":
+            marker = os.path.join(d, "fsmonitor-ran")
+            hook = write("hook.sh", "#!/bin/sh\n: > '%s'\n" % marker)
+            os.chmod(hook, 0o755)
+            git("config", "core.fsmonitor", hook)
+            git_ignored_paths(d)
+            check("core.fsmonitor を実行しない", os.path.exists(marker), False)
+    return ok
+
 
 def selftest():
     ok = True
@@ -1343,10 +1529,24 @@ def selftest():
         print("FAIL: scan_width(濁点結合): %r" % (scan_width("ｶﾞﾊﾟ"),))
 
     # 日本語として標準的な共有字は自動修正しない(几帳面・据え置き等)
-    got = scan_text("几帳面と据え置き、机、迹部、于保", False)
-    if [k for _i, k, _s, _d in got] != ["ambiguous"] * 5:
-        ok = False
-        print("FAIL: 共有字が要確認になっていない: %r" % (got,))
+    for word in ("机上の空論", "机の上", "勉強机", "若干", "若干部分", "若干杯",
+                 "干渉", "機能干渉", "干す", "物干し", "梅干し", "据える",
+                 "据え置き", "見据える", "回数据え置き", "几帳面", "床几", "皇后",
+                 "太后", "迹部", "垂迹", "于保", "涌き水", "冲方丁", "并河",
+                 "脳裡", "脚註", "註解", "奇蹟", "桧山"):
+        got = scan_text(word, False)
+        if got:
+            ok = False
+            print("FAIL: 正しい日本語を報告: %s %r" % (word, got))
+    # 同じ字でも中国語の語や単独の用法は「要確認」として報告する
+    for word, ch in (("手机", "机"), ("机器", "机"), ("数据", "据"),
+                     ("根据", "据"), ("干净", "干"), ("几乎", "几"),
+                     ("用于", "于"), ("痕迹", "迹"), ("時間后", "后"),
+                     ("設定并保存", "并"), ("這裡", "裡"), ("註冊", "註")):
+        if ch not in [s for _i, k, s, _d in scan_text(word, False)
+                      if k == "ambiguous"]:
+            ok = False
+            print("FAIL: 中国語の用法を見逃した: %s" % word)
     # 「楼」は日本語の標準字。旧字体の「樓」は報告のみで自動修正しない
     if scan_text("楼閣", False) != [] or \
             [(k, d) for _i, k, _s, d in scan_text("樓閣", False)] \
@@ -1451,9 +1651,9 @@ def selftest():
         check("--l10n なしの .po", run("n.po", 'msgstr "关门"\n')[0], 0)
 
         # CI で正当な日本語を許容できる
-        check("既定の終了コード", run("o.md", "机の上\n")[0], 1)
-        check("--fail-on", run("p.md", "机の上\n", "--fail-on", "fix")[0], 0)
-        check("--ignore-chars", run("q.md", "机の上\n", "--ignore-chars", "机")[0],
+        check("既定の終了コード", run("o.md", "國の上\n")[0], 1)
+        check("--fail-on", run("p.md", "國の上\n", "--fail-on", "fix")[0], 0)
+        check("--ignore-chars", run("q.md", "國の上\n", "--ignore-chars", "國")[0],
               0)
         check("--ignore-chars の修正除外", run(
             "r.md", "关门\n", "--ignore-chars", "关", "--fix")[1], "关門\n")
@@ -1532,6 +1732,8 @@ def selftest():
                 ok = False
                 print("FAIL: バックアップが書き換えられた")
 
+    ok = _selftest_gitignore() and ok
+
     print("selftest: %s" % ("OK" if ok else "FAILED"))
     return 0 if ok else 1
 
@@ -1579,10 +1781,12 @@ def main(argv=None):
                          ".resx .ftl .yml など)の値を走査する")
     ap.add_argument("--ignore-chars", metavar="CHARS", default="",
                     help="検出・修正しない文字を並べて指定する"
-                         "(例: --ignore-chars 机干据)")
+                         "(例: --ignore-chars 澤廣櫻)")
     ap.add_argument("--fail-on", metavar="KINDS", default=None,
                     help="終了コード 1 にする種別をカンマ区切りで指定する"
                          "(例: fix,suspicious。既定は全種別)")
+    ap.add_argument("--no-gitignore", action="store_true",
+                    help="Git の無視対象(.gitignore など)も走査する")
     ap.add_argument("--selftest", action="store_true",
                     help="内部テストを実行して終了")
     args = ap.parse_args(argv)
@@ -1620,7 +1824,8 @@ def main(argv=None):
     scanner = FileScanner(args)
     results = []
     missing_paths = []
-    for path in iter_files(args.paths, args.exclude, missing_paths):
+    for path in iter_files(args.paths, args.exclude, missing_paths,
+                           use_gitignore=not args.no_gitignore):
         if path.endswith(BACKUP_SUFFIX):
             continue  # --all / --ext / パス直接指定でもバックアップは書き換えない
         try:

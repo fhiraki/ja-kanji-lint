@@ -52,7 +52,7 @@ If you do not read Japanese, have a Japanese speaker confirm `ambiguous` finding
 | Kind (`--fail-on` name) | Examples | `--fix` |
 |---|---|---|
 | Fix candidate (`fix`) | `关→関` `质→質` `说→説` | Fixed |
-| Needs review (`ambiguous`) | `发→発/髪` `國→国` `机` | Report only |
+| Needs review (`ambiguous`) | `发→発/髪` `國→国` `手机` | Report only |
 | Chinese-only (`suspicious`) | `们` `这` `账` | Report only |
 | Word typo (`word`) | `後程→後ほど` | Fixed with `--fix-words` |
 | Repeated punctuation (`dup`) | `。。` `、、` `、。` | Fixed |
@@ -67,6 +67,7 @@ A common tip is to save a file as Shift-JIS and treat garbled characters as non-
 
 - **Chinese-only** means the character is in the mainland Chinese set (GB2312) and in neither the Japanese sets (JIS X 0208/0213) nor the Taiwanese set (Big5).
 - **Auto-fix never touches** a character that Shift-JIS can represent, or one found in both the Japanese and Taiwanese sets. Old forms used in names, such as `國` `實` `澤`, and terms such as `骨粗鬆症` stay as written.
+- **Common Japanese kanji** such as `机` `干` `据` are reported only inside Chinese words such as `手机` `干净` `数据`. Japanese words such as `机上` `若干` `据え置き` are not reported.
 - **Characters shared by Japanese and Chinese**, such as `学` `区` `声`, are not reported.
 
 ### Options
@@ -81,13 +82,14 @@ A common tip is to save a file as Shift-JIS and treat garbled characters as non-
 | `--no-typos` | Turn off word, punctuation, particle, and bracket checks and their fixes |
 | `--punct` | Also handle the Chinese comma (`，→、`) |
 | `--l10n` | Scan the values in translation files |
-| `--ignore-chars CHARS` | Never report or fix these characters, for example `--ignore-chars 机干据` |
+| `--ignore-chars CHARS` | Never report or fix these characters, for example `--ignore-chars 澤廣櫻` |
 | `--fail-on KINDS` | Exit 1 only for these comma-separated kinds, for example `fix,suspicious` |
 | `--json` | Print JSON to stdout, with diffs and backup notices on stderr |
 | `--include-strings` | Scan whole code lines, including string literals |
 | `--all` | Treat other text files as documents (known binary types and backups are excluded) |
 | `--ext .tex .org` | Scan more extensions as documents |
 | `--exclude dir1 dir2` | Exclude more directory names |
+| `--no-gitignore` | Also scan files ignored by Git |
 | `--no-skip-zh` | Turn off the automatic skip for Chinese documents |
 | `--words typos.json` | Load more word typos from JSON |
 | `--encoding ENC` | Input encoding, also used when writing (UTF-16/32 keep their byte order and BOM) |
@@ -103,6 +105,7 @@ Exit codes are `0` for no findings, `1` for findings, and `2` for errors such as
 - **Source code** (`.py`, `.ts`, `.go`, `.sql`, `.sh`, and others): comments only. Block comments include `/* */`, Vue `<!-- -->`, Lua `--[[ ]]`, Haskell `{- -}`, and Ruby `=begin`/`=end`. Multi-line strings such as Python docstrings and JavaScript template literals are not treated as comments.
 - **Reported but never auto-fixed:** URLs, Markdown link targets and code, HTML `href`/`src` values, and JSON keys.
 - **Skipped by default:** directories such as `.git`, `node_modules`, `venv`, `build`, and `dist`.
+- **Files ignored by Git are skipped** when you scan a directory in a Git repository, including nested repositories. Tracked files are still scanned, and so is any file or directory you pass directly. Use `--no-gitignore` to scan ignored files. If Git cannot run, the tool prints a warning and scans them.
 - **Chinese documents are skipped** when the file name has a token such as `zh`, `zh-CN`, or `cn`, or when a document has no kana and 10 or more Chinese-related characters. Use `--no-skip-zh` to scan them.
 
 ### Using it in CI
@@ -112,7 +115,7 @@ Exit codes are `0` for no findings, `1` for findings, and `2` for errors such as
   run: python3 path/to/ja_kanji_lint.py . --fail-on fix,suspicious
 ```
 
-`--fail-on` keeps correct Japanese such as `机` or `干渉` from failing the build. Use `--ignore-chars` to silence specific characters.
+`--fail-on` keeps report-only findings, such as old-form names like `澤田`, from failing the build. Use `--ignore-chars` to silence specific characters.
 
 ### Extending the tables
 
@@ -194,7 +197,7 @@ python3 ja_kanji_lint.py locales/ja --l10n
 | 種別(`--fail-on` の名前) | 例 | `--fix` |
 |---|---|---|
 | 修正候補(`fix`) | `关→関` `质→質` `说→説` | 修正する |
-| 要確認(`ambiguous`) | `发→発/髪` `國→国` `机` | 報告のみ |
+| 要確認(`ambiguous`) | `发→発/髪` `國→国` `手机` | 報告のみ |
 | 中華圏専用字(`suspicious`) | `们` `这` `账` | 報告のみ |
 | 誤字候補(`word`) | `後程→後ほど` | `--fix-words` で修正 |
 | 重複記号(`dup`) | `。。` `、、` `、。` | 修正する |
@@ -209,6 +212,7 @@ python3 ja_kanji_lint.py locales/ja --l10n
 
 - **中華圏専用字**は、中国本土の文字集合(GB2312)にあり、日本語(JIS X 0208/0213)にも台湾(Big5)にもない字に限定しています。
 - **自動修正の対象外**は、Shift-JIS で表せる字と、日本語・台湾の両方の文字集合にある字です。人名に使われる `國` `實` `澤` などの旧字体や、`骨粗鬆症` のような用語は書き換えません。
+- **日本語で日常的に使う字**(`机` `干` `据` など)は、`手机` `干净` `数据` のような中国語の語に含まれるときだけ報告します。`机上` `若干` `据え置き` のような日本語は報告しません。
 - **日中共通の字**(`学` `区` `声` など)は検出しません。
 
 ### オプション
@@ -223,13 +227,14 @@ python3 ja_kanji_lint.py locales/ja --l10n
 | `--no-typos` | 誤字・重複記号・助詞重複・括弧不一致の検出と修正を無効にする |
 | `--punct` | 中国語の読点(`，→、`)も対象にする |
 | `--l10n` | 翻訳ファイルの値を走査する |
-| `--ignore-chars CHARS` | 指定した字を検出・修正しない(例: `--ignore-chars 机干据`) |
+| `--ignore-chars CHARS` | 指定した字を検出・修正しない(例: `--ignore-chars 澤廣櫻`) |
 | `--fail-on KINDS` | 指定した種別(カンマ区切り)のときだけ終了コード 1 にする(例: `fix,suspicious`) |
 | `--json` | JSON を標準出力に出す(diff とバックアップ通知は標準エラー出力) |
 | `--include-strings` | コード行全体(文字列リテラルを含む)を走査する |
 | `--all` | その他のテキストファイルも文書として走査する(既知のバイナリとバックアップは除外) |
 | `--ext .tex .org` | 文書として走査する拡張子を追加する |
 | `--exclude dir1 dir2` | 除外するディレクトリ名を追加する |
+| `--no-gitignore` | Git の無視対象も走査する |
 | `--no-skip-zh` | 中国語文書の自動除外を無効にする |
 | `--words typos.json` | 追加の誤字辞書 JSON を読み込む |
 | `--encoding ENC` | 入力エンコーディングを指定する(書き戻しにも使用。UTF-16/32 はバイト順と BOM を保持) |
@@ -245,6 +250,7 @@ python3 ja_kanji_lint.py locales/ja --l10n
 - **ソースコード**(`.py` `.ts` `.go` `.sql` `.sh` など): コメントのみ。ブロックコメントは `/* */`、Vue の `<!-- -->`、Lua の `--[[ ]]`、Haskell の `{- -}`、Ruby の `=begin`/`=end` に対応しています。Python の docstring や JavaScript のテンプレートリテラルなどの複数行文字列は、コメントとして扱いません。
 - **報告はするが自動修正しない部分:** URL、Markdown のリンク先とコード、HTML の `href`/`src`、JSON のキー
 - **既定で除外:** `.git` `node_modules` `venv` `build` `dist` などのディレクトリ
+- **Git の無視対象も除外:** Git リポジトリ内のディレクトリを走査するときは、`.gitignore` などで無視されたファイルを除外します(入れ子のリポジトリも含む)。追跡済みのファイルと、直接指定したファイルやディレクトリは走査します。無視対象も走査するには `--no-gitignore` を指定します。Git を実行できない場合は、警告を表示して走査します。
 - **中国語文書の自動除外:** ファイル名に `zh` `zh-CN` `cn` などの区切りを含むものと、かなが1文字もなく中国語系の字が10件以上ある文書は除外します。走査するには `--no-skip-zh` を指定します。
 
 ### CI での利用
@@ -254,7 +260,7 @@ python3 ja_kanji_lint.py locales/ja --l10n
   run: python3 path/to/ja_kanji_lint.py . --fail-on fix,suspicious
 ```
 
-`--fail-on` を使うと、`机` や `干渉` のような正しい日本語でビルドが失敗しなくなります。特定の字を除外するには `--ignore-chars` を使います。
+`--fail-on` を使うと、`澤田` のような旧字体の人名など、報告のみの結果でビルドが失敗しなくなります。特定の字を除外するには `--ignore-chars` を使います。
 
 ### 辞書の拡張
 
