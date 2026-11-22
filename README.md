@@ -87,23 +87,24 @@ A common tip is to save a file as Shift-JIS and treat garbled characters as non-
 | `--fail-on KINDS` | Exit 1 only for these comma-separated kinds, for example `fix,suspicious` |
 | `--json` | Print JSON to stdout, with diffs and backup notices on stderr |
 | `--include-strings` | Scan whole code lines, including string literals |
-| `--all` | Treat other text files as documents (known binary types and backups are excluded) |
+| `--all` | Treat other text files as documents (binary files and backups are skipped) |
 | `--ext .tex .org` | Scan more extensions as documents |
 | `--exclude dir1 dir2` | Exclude more directory names |
 | `--no-gitignore` | Also scan files ignored by Git |
 | `--no-skip-zh` | Turn off the automatic skip for Chinese documents |
 | `--words typos.json` | Load more word typos from JSON |
 | `--encoding ENC` | Input encoding, also used when writing (UTF-16/32 keep their byte order and BOM) |
+| `--max-size MB` | Largest file to scan, in MB (default `10`, `0` for no limit). Larger files are reported as errors |
 | `--selftest` | Run the built-in tests and exit |
 
 Put paths before `--ext` and `--exclude`, because those options accept several values.
 
-Exit codes are `0` for no findings, `1` for findings, and `2` for errors such as a missing path or an unreadable file. The code reflects the state before fixes, so a successful `--fix` still exits `1`.
+Exit codes are `0` for no findings, `1` for findings, and `2` for errors such as a missing path, an unreadable file, or a fix that could not be written. The code reflects the state before fixes, so a successful `--fix` still exits `1`.
 
 ### What gets scanned
 
 - **Documents** (`.md`, `.txt`, `.html`, `.json`, `.csv`, and others): the whole file.
-- **Source code** (`.py`, `.ts`, `.go`, `.sql`, `.sh`, and others): comments only. Block comments include `/* */`, Vue `<!-- -->`, Lua `--[[ ]]`, Haskell `{- -}`, and Ruby `=begin`/`=end`. Multi-line strings such as Python docstrings and JavaScript template literals are not treated as comments.
+- **Source code** (`.py`, `.ts`, `.go`, `.sql`, `.sh`, and others): comments only. Block comments include `/* */`, Vue `<!-- -->`, Lua `--[[ ]]`, Haskell `{- -}`, and Ruby `=begin`/`=end`. Multi-line strings such as Python docstrings and JavaScript template literals, and shell here-documents, are not treated as comments.
 - **Reported but never auto-fixed:** URLs, Markdown link targets and code, HTML `href`/`src` values, and JSON keys.
 - **Skipped by default:** directories such as `.git`, `node_modules`, `venv`, `build`, and `dist`.
 - **Files ignored by Git are skipped** when you scan a directory in a Git repository, including nested repositories. Tracked files are still scanned, and so is any file or directory you pass directly. Use `--no-gitignore` to scan ignored files. If Git cannot run, the tool prints a warning and scans them.
@@ -233,23 +234,24 @@ python3 ja_kanji_lint.py locales/ja --l10n
 | `--fail-on KINDS` | 指定した種別(カンマ区切り)のときだけ終了コード 1 にする(例: `fix,suspicious`) |
 | `--json` | JSON を標準出力に出す(diff とバックアップ通知は標準エラー出力) |
 | `--include-strings` | コード行全体(文字列リテラルを含む)を走査する |
-| `--all` | その他のテキストファイルも文書として走査する(既知のバイナリとバックアップは除外) |
+| `--all` | その他のテキストファイルも文書として走査する(バイナリとバックアップは除外) |
 | `--ext .tex .org` | 文書として走査する拡張子を追加する |
 | `--exclude dir1 dir2` | 除外するディレクトリ名を追加する |
 | `--no-gitignore` | Git の無視対象も走査する |
 | `--no-skip-zh` | 中国語文書の自動除外を無効にする |
 | `--words typos.json` | 追加の誤字辞書 JSON を読み込む |
 | `--encoding ENC` | 入力エンコーディングを指定する(書き戻しにも使用。UTF-16/32 はバイト順と BOM を保持) |
+| `--max-size MB` | 走査するファイルサイズの上限を MB で指定する(既定 `10`、`0` で上限なし)。超えたファイルはエラーとして報告する |
 | `--selftest` | 内部テストを実行して終了する |
 
 `--ext` と `--exclude` は複数の値を受け取るため、パスはこれらより前に指定してください。
 
-終了コードは `0`=検出なし、`1`=検出あり、`2`=エラー(存在しないパス、読み取れないファイルなど)です。修正前の状態を反映するため、`--fix` が成功しても `1` を返します。
+終了コードは `0`=検出なし、`1`=検出あり、`2`=エラー(存在しないパス、読み取れないファイル、修正を書き込めないファイルなど)です。修正前の状態を反映するため、`--fix` が成功しても `1` を返します。
 
 ### 走査の範囲
 
 - **ドキュメント**(`.md` `.txt` `.html` `.json` `.csv` など): ファイル全体
-- **ソースコード**(`.py` `.ts` `.go` `.sql` `.sh` など): コメントのみ。ブロックコメントは `/* */`、Vue の `<!-- -->`、Lua の `--[[ ]]`、Haskell の `{- -}`、Ruby の `=begin`/`=end` に対応しています。Python の docstring や JavaScript のテンプレートリテラルなどの複数行文字列は、コメントとして扱いません。
+- **ソースコード**(`.py` `.ts` `.go` `.sql` `.sh` など): コメントのみ。ブロックコメントは `/* */`、Vue の `<!-- -->`、Lua の `--[[ ]]`、Haskell の `{- -}`、Ruby の `=begin`/`=end` に対応しています。Python の docstring や JavaScript のテンプレートリテラルなどの複数行文字列と、シェルのヒアドキュメントは、コメントとして扱いません。
 - **報告はするが自動修正しない部分:** URL、Markdown のリンク先とコード、HTML の `href`/`src`、JSON のキー
 - **既定で除外:** `.git` `node_modules` `venv` `build` `dist` などのディレクトリ
 - **Git の無視対象も除外:** Git リポジトリ内のディレクトリを走査するときは、`.gitignore` などで無視されたファイルを除外します(入れ子のリポジトリも含む)。追跡済みのファイルと、直接指定したファイルやディレクトリは走査します。無視対象も走査するには `--no-gitignore` を指定します。Git を実行できない場合は、警告を表示して走査します。

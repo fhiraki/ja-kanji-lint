@@ -26,6 +26,7 @@ ja_kanji_lint.py — 日本語テキスト内の中国語系漢字(簡体字・�
 """
 
 import argparse
+import bisect
 import codecs
 import contextlib
 import difflib
@@ -358,7 +359,11 @@ MULTILINE_STRINGS = {
     ".kt": (('"""',), False), ".scala": (('"""',), False),
     ".cs": (('"""',), False),
     ".lua": (("[[", "[=[", "[==["), False),
+    ".graphql": (('"""',), True),
 }
+
+# ヒアドキュメント(<<EOT 〜 EOT)の中身をコメントとして扱わない拡張子
+HEREDOC_EXTS = {".sh", ".bash", ".zsh"}
 
 # 開始と終了で記号が異なる複数行文字列
 _STRING_CLOSERS = {"[[": "]]", "[=[": "]=]", "[==[": "]==]"}
@@ -372,7 +377,7 @@ BINARY_EXTS = {
     ".ttf", ".otf", ".eot", ".mp3", ".m4a", ".wav", ".ogg", ".flac",
     ".mp4", ".mov", ".avi", ".mkv", ".webm", ".psd", ".ai", ".sketch",
     ".xls", ".xlsx", ".doc", ".docx", ".ppt", ".pptx", ".icns", ".sqlite",
-    ".db", ".dmg", ".iso", ".wasm", ".xlsxm",
+    ".db", ".dmg", ".iso", ".wasm", ".xlsm",
 }
 
 # ブロックコメントの定義。nested は入れ子可、line_start は行頭でのみ有効な記号。
@@ -381,12 +386,15 @@ BlockComment = namedtuple("BlockComment",
                           defaults=(False, False))
 
 # 拡張子 → (行コメントマーカー群, ブロックコメント(1つ or 複数) or None)
+# 3つ目の要素は、行頭(字下げの直後)でのみ有効な行コメントマーカー群。
+# INI の「;」は、nginx.conf のように文の区切りにも使われるため行頭に限定する。
 EXT_LANG = {
     ".py": (["#"], None),
     ".rb": (["#"], BlockComment("=begin", "=end", line_start=True)),
     ".sh": (["#"], None), ".bash": (["#"], None), ".zsh": (["#"], None),
     ".yml": (["#"], None), ".yaml": (["#"], None), ".toml": (["#"], None),
-    ".ini": (["#"], None), ".cfg": (["#"], None), ".conf": (["#"], None),
+    ".ini": (["#"], None, [";"]), ".cfg": (["#"], None, [";"]),
+    ".conf": (["#"], None, [";"]),
     ".r": (["#"], None), ".mk": (["#"], None),
     ".js": (["//"], ("/*", "*/")), ".jsx": (["//"], ("/*", "*/")),
     ".ts": (["//"], ("/*", "*/")), ".tsx": (["//"], ("/*", "*/")),
@@ -399,7 +407,7 @@ EXT_LANG = {
     ".cs": (["//"], ("/*", "*/")), ".scala": (["//"], ("/*", "*/")),
     ".m": (["//"], ("/*", "*/")), ".vue": (["//"], (("/*", "*/"), ("<!--", "-->"))),
     ".scss": (["//"], ("/*", "*/")), ".less": (["//"], ("/*", "*/")),
-    ".proto": (["//"], ("/*", "*/")), ".graphql": (["//"], None),
+    ".proto": (["//"], ("/*", "*/")), ".graphql": (["#"], None),
     ".css": ([], ("/*", "*/")),
     ".sql": (["--"], ("/*", "*/")),
     ".lua": (["--"], (("--[[", "]]"), ("--[=[", "]=]"), ("--[==[", "]==]"))),
@@ -415,7 +423,7 @@ DEFAULT_EXCLUDES = [
     ".next", "coverage", ".build", "Pods", ".terraform", "__MACOSX",
 ]
 
-MAX_SIZE = 10 * 1024 * 1024  # 10MB
+DEFAULT_MAX_SIZE_MB = 10  # --max-size の既定値
 
 # --backup が作成するファイルの接尾辞。元の内容を保持するため走査・修正しない
 BACKUP_SUFFIX = ".bak-ja-kanji-lint"
@@ -431,9 +439,12 @@ ZH_DIR_RE = re.compile(r"(?:^|[_\-.])zh(?:[-_](?:cn|tw|hk|sg|hans|hant|r[a-z]{2}
                        r"(?:[_\-.]|$)", re.IGNORECASE)
 
 # --fix で書き換えない領域(検出結果としては報告する)
-_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s<>\"'`)\]」』、。，]+")
+# 長い英数字列で計算量が行長の2乗にならないよう、語の先頭でのみ照合を始める
+_URL_RE = re.compile(r"(?<![A-Za-z0-9+.\-])[A-Za-z0-9+.\-]+://"
+                     r"[^\s<>\"'`)\]」』、。，]+")
+_HEREDOC_RE = re.compile(r"(?<!<)<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
 _MD_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
-_MD_INLINE_CODE_RE = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)")
+_MD_BACKTICKS_RE = re.compile(r"`+")
 _MD_LINK_RE = re.compile(r"\]\(([^)\s]+)")
 _HTML_ATTR_RE = re.compile(r"\b(?:href|src)\s*=\s*(\"[^\"]*\"|'[^']*')",
                            re.IGNORECASE)
@@ -446,12 +457,20 @@ _STRINGS_KEY_RE = re.compile(r"\s*(?:\"(?:[^\"\\]|\\.)*\"|[\w.\-]+)\s*=\s*")
 _PROPERTIES_SEP_RE = re.compile(r"(?<!\\)[=:]")
 _FTL_KEY_RE = re.compile(r"-?[\w-]+\s*=\s*")
 _FTL_ATTR_RE = re.compile(r"\s*\.[\w-]+\s*=\s*")
-_YAML_KEY_RE = re.compile(r"\s*(?:-\s+)*(?:\"(?:[^\"\\]|\\.)*\"|'[^']*'|"
-                          r"[^\s#:'\"][^:#]*?)\s*:(?=\s|$)")
+# 素のキーは最初の「:」までを一度に読む(空白の連続で計算量が2乗にならない形)
+_YAML_KEY_RE = re.compile(r"\s*(?:-\s+)*(?:(?:\"(?:[^\"\\]|\\.)*\"|'[^']*')\s*"
+                          r"|[^\s#:'\"][^:#]*):(?=\s|$)")
+
+# 行の分割(改行文字を保持する)。\r\n / \n / \r だけを行の区切りとする
+_LINE_RE = re.compile(r"[^\r\n]*(?:\r\n|\n|\r)|[^\r\n]+")
 
 
 class SkipFile(Exception):
     """対象外としてスキップすべきファイル。"""
+
+
+class BinaryFile(IOError):
+    """NUL を含むなど、テキストではないと判定したファイル。"""
 
 
 def _quotes_unbalanced(line):
@@ -459,11 +478,11 @@ def _quotes_unbalanced(line):
     return line.count("'") % 2 == 1 or line.count('"') % 2 == 1
 
 
-def _find_marker_quoted(line, marker, start):
-    """文字列リテラル(引用符)の外側にある marker を探す。"""
+def _find_marker_quoted(line, marker, start, limit=None):
+    """文字列リテラル(引用符)の外側にある marker を limit より前で探す。"""
     q = None
     i = start
-    n = len(line)
+    n = len(line) if limit is None else limit
     while i < n:
         c = line[i]
         if q:
@@ -488,10 +507,10 @@ def _find_marker_quoted(line, marker, start):
     return -1
 
 
-def _find_marker_plain(line, marker, start):
+def _find_marker_plain(line, marker, start, limit=None):
     """引用符を考慮せず marker を探す(URL スキームのガードのみ適用)。"""
     i = start
-    n = len(line)
+    n = len(line) if limit is None else limit
     while i < n:
         if line.startswith(marker, i):
             if marker == "//" and i > 0 and line[i - 1] == ":":
@@ -502,17 +521,30 @@ def _find_marker_plain(line, marker, start):
     return -1
 
 
-def find_marker(line, marker, start):
+def find_marker(line, marker, start, limit=None, unbalanced=None):
     """marker の位置を返す。無ければ -1。
 
     引用符を考慮した検索で見つからない場合、行内の引用符の個数が奇数
     (例: 英文の it's のようなアポストロフィで文字列判定が崩れている行)
     ならば単純検索にフォールバックし、コメント検出の取りこぼしを防ぐ。
     """
-    j = _find_marker_quoted(line, marker, start)
-    if j == -1 and _quotes_unbalanced(line):
-        j = _find_marker_plain(line, marker, start)
+    j = _find_marker_quoted(line, marker, start, limit)
+    if j == -1:
+        if unbalanced is None:
+            unbalanced = _quotes_unbalanced(line)
+        if unbalanced:
+            j = _find_marker_plain(line, marker, start, limit)
     return j
+
+
+def _next_plain(line, marker, pos, cache):
+    """pos 以降の marker の位置を返す。結果を再利用し、長い行でも線形に保つ。"""
+    cached = cache.get(marker, -2)
+    if cached == -1 or cached >= pos:
+        return cached
+    cached = line.find(marker, pos)
+    cache[marker] = cached
+    return cached
 
 
 def _block_comments(block):
@@ -533,14 +565,23 @@ def _matches_line_start(line, marker):
             and (len(line) == len(marker) or line[len(marker)].isspace()))
 
 
-def _find_block_open(line, blocks, start):
+def _find_block_open(line, blocks, start, cache, unbalanced):
     """start 以降で最初のブロックコメント開始の (位置, BlockComment) を返す。"""
-    best, opened = -1, None
+    candidates = []
     for b in blocks:
         if b.line_start:
-            j = 0 if start == 0 and _matches_line_start(line, b.open) else -1
-        else:
-            j = find_marker(line, b.open, start)
+            if start == 0 and _matches_line_start(line, b.open):
+                return 0, b
+            continue
+        p = _next_plain(line, b.open, start, cache)
+        if p != -1:
+            candidates.append((p, b))
+    best, opened = -1, None
+    for p, b in sorted(candidates, key=lambda c: c[0]):
+        if best != -1 and p >= best:
+            break
+        j = find_marker(line, b.open, start, best if best != -1 else None,
+                        unbalanced)
         if j != -1 and (best == -1 or j < best):
             best, opened = j, b
     return best, opened
@@ -572,7 +613,8 @@ def _find_block_end(line, start, block, depth):
 
 def iter_comment_spans(bodies, lang):
     """各行(改行除去済み)ごとのコメント領域 (行index, start, end) を列挙する。"""
-    line_markers, block = lang
+    line_markers, block = lang[0], lang[1]
+    start_markers = tuple(lang[2]) if len(lang) > 2 else ()
     blocks = _block_comments(block)
     active = None
     depth = 0
@@ -580,6 +622,11 @@ def iter_comment_spans(bodies, lang):
         n = len(line)
         if n == 0:
             continue
+        if start_markers and not active:
+            indent = n - len(line.lstrip())
+            if line.startswith(start_markers, indent):
+                yield i, indent, n
+                continue
         spans = []
         pos = 0
         if active:
@@ -591,13 +638,22 @@ def iter_comment_spans(bodies, lang):
                 spans.append((0, e))
                 pos = e
                 active = None
+        cache = {}
+        unbalanced = _quotes_unbalanced(line)
         while pos < n:
+            bs, opened = _find_block_open(line, blocks, pos, cache, unbalanced)
+            # 行コメントは次のブロック開始より前にある場合だけ意味を持つ
             lm = None
             for m in line_markers:
-                j = find_marker(line, m, pos)
-                if j != -1 and (lm is None or j < lm):
+                bound = bs if bs != -1 else None
+                if lm is not None and (bound is None or lm < bound):
+                    bound = lm
+                p = _next_plain(line, m, pos, cache)
+                if p == -1 or (bound is not None and p >= bound):
+                    continue
+                j = find_marker(line, m, pos, bound, unbalanced)
+                if j != -1:
                     lm = j
-            bs, opened = _find_block_open(line, blocks, pos)
             if lm is None and bs == -1:
                 break
             # Lua の --[[ は行コメント -- と同じ位置で始まるためブロックを優先する
@@ -624,7 +680,7 @@ def mask_multiline_strings(bodies, lang, spec):
     実行時の文字列を書き換えてしまうため、コメント抽出の前に取り除く。
     """
     delims, escapes = spec
-    line_markers, block = lang
+    line_markers, block = lang[0], lang[1]
     blocks = [b for b in _block_comments(block) if not b.line_start]
     out = []
     in_str = None
@@ -635,7 +691,16 @@ def mask_multiline_strings(bodies, lang, spec):
         n = len(line)
         i = 0
         quote = None
-        while i < n:
+        quote_pos = 0
+        dead = ""   # この行では文字列の開始とみなさない引用符
+        while i < n or quote:
+            if i >= n:
+                # 行末まで閉じない引用符は文字列ではない(JSX の Don't など)。
+                # 以降の複数行文字列を見落とさないよう、その直後から判定し直す
+                dead += quote
+                i = quote_pos + 1
+                quote = None
+                continue
             if in_str:
                 if escapes and line[i] == "\\":
                     chars[i] = " "
@@ -685,10 +750,65 @@ def mask_multiline_strings(bodies, lang, spec):
                    and not (m == "//" and i > 0 and line[i - 1] == ":")
                    for m in line_markers):
                 break
-            if line[i] in "\"'":
+            if line[i] in "\"'" and line[i] not in dead:
                 quote = line[i]
+                quote_pos = i
             i += 1
         out.append("".join(chars))
+    return out
+
+
+def mask_heredocs(bodies):
+    """シェルのヒアドキュメントの中身を空行に置き換えた行を返す。
+
+    中身は実行時のデータなので、# で始まる行をコメントとして書き換えない。
+    終端の行が見つからない「<<」(算術式のシフトなど)は対象にしない。
+    """
+    where = {}
+    for i, line in enumerate(bodies):
+        where.setdefault(line.strip(), []).append(i)
+    out = list(bodies)
+    i = 0
+    while i < len(bodies):
+        line = bodies[i]
+        i += 1
+        if "<<" not in line:
+            continue
+        comment = find_marker(line, "#", 0)
+        for m in _HEREDOC_RE.finditer(line):
+            if comment != -1 and m.start() > comment:
+                break
+            dash, word = m.group(1), m.group(3)
+            rows = where.get(word, ())
+            k = bisect.bisect_left(rows, i)
+            # 終端は語だけの行。<<- のときは行頭のタブを許す
+            while k < len(rows) and word != (bodies[rows[k]].lstrip("\t")
+                                             if dash else bodies[rows[k]]):
+                k += 1
+            if k == len(rows):
+                continue
+            for j in range(i, rows[k]):
+                out[j] = ""
+            i = rows[k] + 1
+    return out
+
+
+def _md_inline_code_spans(line):
+    """Markdown のインラインコード(同じ長さのバッククォートの組)の範囲を返す。"""
+    runs = [m.span() for m in _MD_BACKTICKS_RE.finditer(line)]
+    by_length = {}
+    for idx, (s, e) in enumerate(runs):
+        by_length.setdefault(e - s, []).append(idx)
+    out = []
+    i = 0
+    while i < len(runs):
+        same = by_length[runs[i][1] - runs[i][0]]
+        k = bisect.bisect_right(same, i)
+        if k < len(same):
+            out.append((runs[i][0], runs[same[k]][1]))
+            i = same[k] + 1
+        else:
+            i += 1
     return out
 
 
@@ -720,7 +840,7 @@ def protected_spans(bodies, ext):
                 ranges.append((0, len(b)))
                 out[i] = ranges
                 continue
-            ranges += [x.span() for x in _MD_INLINE_CODE_RE.finditer(b)]
+            ranges += _md_inline_code_spans(b)
             ranges += [x.span(1) for x in _MD_LINK_RE.finditer(b)]
         if has_html:
             ranges += [x.span(1) for x in _HTML_ATTR_RE.finditer(b)]
@@ -749,7 +869,8 @@ def subtract_ranges(spans, ranges):
 
 
 def _xml_value_spans(bodies, tag):
-    open_re = re.compile(r"<%s(?:\s[^>]*?)?(?<!/)>" % tag)
+    # 属性部分は次の「<」を越えない(「>」のない長い行で2乗時間にしない)
+    open_re = re.compile(r"<%s(?:\s[^<>]*)?(?<!/)>" % tag)
     close = "</%s>" % tag
     spans = {}
     inside = False
@@ -1092,10 +1213,12 @@ class FileScanner(object):
         BOM 付き UTF-8 の場合は utf-8-sig で読み書きし、BOM を保持する。
         UTF-16/32 はバイト順と BOM の有無を保持する。
         """
+        limit = self.args.max_size * 1024 * 1024   # 0 は上限なし
         with open(path, "rb") as f:
-            raw = f.read(MAX_SIZE + 1)
-        if len(raw) > MAX_SIZE:
-            raise IOError("ファイルが大きすぎます (>10MB)")
+            raw = f.read(limit + 1) if limit else f.read()
+        if limit and len(raw) > limit:
+            raise IOError("ファイルが大きすぎます (>%dMB。--max-size で変更できます)"
+                          % self.args.max_size)
         if not raw.startswith(codecs.BOM_UTF8):
             wide = wide_encoding(raw, self.args.encoding)
             if wide:
@@ -1103,10 +1226,10 @@ class FileScanner(object):
                 # デコード後の文字で判定する
                 text = raw[len(wide[1]):].decode(wide[0])
                 if "\x00" in text:
-                    raise IOError("バイナリファイルの可能性")
+                    raise BinaryFile("バイナリファイルの可能性")
                 return text, wide
         if b"\x00" in raw:
-            raise IOError("バイナリファイルの可能性")
+            raise BinaryFile("バイナリファイルの可能性")
         if raw.startswith(b"\xef\xbb\xbf"):
             enc = "utf-8-sig"
         else:
@@ -1150,7 +1273,9 @@ class FileScanner(object):
         """戻り値: (findings, original_lines, fixed_lines, write_encoding)"""
         text, enc = self.read(path)
         self._check_intentional_chinese(path, text, kind)
-        lines = text.splitlines(keepends=True)
+        # str.splitlines は改ページ(\x0c)や U+2028 でも分割し、エディタや Git と
+        # 行番号がずれるため、改行文字だけで分ける
+        lines = _LINE_RE.findall(text)
         bodies = [ln.rstrip("\r\n") for ln in lines]
         ext = os.path.splitext(path)[1].lower()
         protected = protected_spans(bodies, ext)
@@ -1166,6 +1291,8 @@ class FileScanner(object):
             spec = MULTILINE_STRINGS.get(ext)
             masked = (mask_multiline_strings(bodies, lang, spec) if spec
                       else bodies)
+            if ext in HEREDOC_EXTS:
+                masked = mask_heredocs(masked)
             for i, s, e in iter_comment_spans(masked, lang):
                 spans_by_line.setdefault(i, []).append((s, e))
         else:
@@ -1269,7 +1396,11 @@ def print_diff(path, old_lines, new_lines, stream=None):
     stream = stream or sys.stdout
     diff = difflib.unified_diff(old_lines, new_lines,
                                 fromfile="a/" + path, tofile="b/" + path)
-    stream.writelines(diff)
+    for line in diff:
+        stream.write(line)
+        if not line.endswith("\n"):
+            # 末尾に改行のないファイルで、次の行と連結されないようにする
+            stream.write("\n\\ No newline at end of file\n")
 
 
 def apply_fix(path, fixed_lines, do_backup, encoding, stream=None):
@@ -1775,6 +1906,116 @@ def selftest():
                  "x =begin\n关门\n=beginning\n关门\n")):
             check("コメント %s" % name, run(name, text, "--fix")[1], expected)
 
+        # 保護範囲の判定(URL・インラインコード)
+        check("URL の保護範囲", protected_spans(["1https://a.jp/关 x"], ".txt"),
+              {0: [(0, 15)]})
+        check("インラインコード", _md_inline_code_spans("`a` ``b`c`` `d"),
+              [(0, 3), (4, 11)])
+        check("長い行の保護範囲", protected_spans(["a" * 300000], ".md"), {})
+
+        # GraphQL の # コメント、INI の行頭の ; コメント
+        check("GraphQL", run(
+            "c.graphql", '# 关门\n"""\n# 关门\n"""\ntype A { x: Int } # 关门\n',
+            "--fix")[1],
+            '# 関門\n"""\n# 关门\n"""\ntype A { x: Int } # 関門\n')
+        check("INI の ; コメント", run(
+            "c.ini", "; 关门\n  ; 关门\nkey = 关门 ; 关门\n# 关门\n", "--fix")[1],
+            "; 関門\n  ; 関門\nkey = 关门 ; 关门\n# 関門\n")
+        # シェルのヒアドキュメントの中身は書き換えない
+        check("ヒアドキュメント", run(
+            "c.sh", "cat <<EOT # 关门\n# 关门\nEOT\n# 关门\n"
+                    "cat <<-'E2'\n# 关门\n\tE2\nx=$((1 << n)) # 关门\n# 关门\n",
+            "--fix")[1],
+            "cat <<EOT # 関門\n# 关门\nEOT\n# 関門\n"
+            "cat <<-'E2'\n# 关门\n\tE2\nx=$((1 << n)) # 関門\n# 関門\n")
+        # 閉じないアポストロフィがあっても、後続のコメントを見落とさない
+        check("JSX のアポストロフィ", run(
+            "c.tsx", "const a = <p>Don't</p>; const s = `\n// 关门\n`;\n// 关门\n",
+            "--fix")[1],
+            "const a = <p>Don't</p>; const s = `\n// 关门\n`;\n// 関門\n")
+        check("閉じない引用符の連続", mask_multiline_strings(
+            ["'\\'" * 20000 + "`"], (["//"], None), (("`",), True))[0][-1], " ")
+
+        # 改ページ文字などで行番号がずれない
+        with open(os.path.join(d, "ff.md"), "w", encoding="utf-8",
+                  newline="") as h:
+            h.write("a\x0cb c\r\n关\rd")
+        got = FileScanner(argparse.Namespace(
+            max_size=0, encoding="utf-8", no_skip_zh=False, l10n=False,
+            ignore_chars=set(), include_strings=False, punct=False,
+            no_typos=False, width=False, fix=True, diff=False,
+            fix_words=False)).scan(os.path.join(d, "ff.md"), "doc", None)
+        check("行番号", [(f.line_no, f.col) for f in got[0]], [(2, 1)])
+        check("改行の保持", "".join(got[2]), "a\x0cb c\r\n関\rd")
+
+        # 末尾に改行がないファイルの diff で行が連結されない
+        buf = io.StringIO()
+        print_diff("x", ["关门"], ["関門"], buf)
+        check("改行なしの diff", buf.getvalue().splitlines()[3:],
+              ["-关门", "\\ No newline at end of file",
+               "+関門", "\\ No newline at end of file"])
+
+        # 同じファイルを重複して指定しても、バックアップに元の内容を残す
+        p = os.path.join(d, "dup.md")
+        with open(p, "w", encoding="utf-8") as h:
+            h.write("关门\n")
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            main(["--fix", "--backup", p, p])
+        with open(p + BACKUP_SUFFIX, encoding="utf-8") as h:
+            check("重複パスのバックアップ", h.read(), "关门\n")
+        check("重複パスの件数", "合計: 2件" in buf.getvalue(), True)
+        os.unlink(p)
+        os.unlink(p + BACKUP_SUFFIX)
+
+        # --all が拾ったバイナリはエラーにしない。対象拡張子のバイナリはエラー
+        sub = os.path.join(d, "bin")
+        os.makedirs(sub)
+        for name in (".DS_Store", "b.md"):
+            with open(os.path.join(sub, name), "wb") as h:
+                h.write(b"\x00\x01")
+        with contextlib.redirect_stdout(io.StringIO()):
+            check("--all のバイナリ", main(["--all", "--exclude", "b.md", "--",
+                                            os.path.join(sub, ".DS_Store")]), 0)
+            check("文書拡張子のバイナリ", main([os.path.join(sub, "b.md")]), 2)
+        shutil.rmtree(sub)
+
+        # 書き込めないファイルがあっても、残りのファイルは修正する
+        if os.name == "posix" and os.geteuid() != 0:
+            ro = os.path.join(d, "ro")
+            os.makedirs(ro)
+            for p in (os.path.join(ro, "a.md"), os.path.join(d, "zz.md")):
+                with open(p, "w", encoding="utf-8") as h:
+                    h.write("关门\n")
+            os.chmod(ro, 0o555)
+            try:
+                with contextlib.redirect_stdout(io.StringIO()), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    code = main(["--fix", ro, os.path.join(d, "zz.md")])
+            finally:
+                os.chmod(ro, 0o755)
+            with open(os.path.join(d, "zz.md"), encoding="utf-8") as h:
+                check("書き込み失敗後の継続", (code, h.read()), (2, "関門\n"))
+            shutil.rmtree(ro)
+            os.unlink(os.path.join(d, "zz.md"))
+
+        # 長い行でも翻訳ファイルのキー判定が終わる
+        locale_value_spans(["a" + " " * 300000], ".yml")
+        locale_value_spans(["<target a" * 30000], ".xliff")
+
+        # --max-size: 上限超過はエラー、上限の変更や 0(上限なし)で走査できる
+        big = "关门\n" + "a" * (1024 * 1024)
+        check("--max-size 超過", run("big.md", big, "--max-size", "1")[0], 2)
+        check("--max-size 拡大", run("big.md", big, "--max-size", "2")[0], 1)
+        check("--max-size 0", run("big.md", big, "--max-size", "0")[0], 1)
+        check("既定の上限内", run("big.md", big)[0], 1)
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                main(["--max-size", "-1", os.path.join(d, "big.md")])
+            check("--max-size の負値", "受理された", "拒否")
+        except SystemExit as ex:
+            check("--max-size の負値", ex.code, 2)
+        os.unlink(os.path.join(d, "big.md"))
+
         # 既存のバックアップは --all --fix でも書き換えない(元の内容を失わないため)
         bak = os.path.join(d, "x.md" + BACKUP_SUFFIX)
         with open(bak, "w", encoding="utf-8") as f:
@@ -1795,6 +2036,17 @@ def selftest():
 # ---------------------------------------------------------------------------
 # 6. main
 # ---------------------------------------------------------------------------
+
+def _max_size_arg(value):
+    """--max-size の値(MB、0 以上の整数)を検証する。"""
+    try:
+        size = int(value)
+    except ValueError:
+        size = -1
+    if size < 0:
+        raise argparse.ArgumentTypeError("0 以上の整数(MB)を指定してください")
+    return size
+
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
@@ -1839,6 +2091,10 @@ def main(argv=None):
     ap.add_argument("--fail-on", metavar="KINDS", default=None,
                     help="終了コード 1 にする種別をカンマ区切りで指定する"
                          "(例: fix,suspicious。既定は全種別)")
+    ap.add_argument("--max-size", metavar="MB", type=_max_size_arg,
+                    default=DEFAULT_MAX_SIZE_MB,
+                    help="走査するファイルサイズの上限(MB)。0 で上限なし"
+                         "(既定: %d)" % DEFAULT_MAX_SIZE_MB)
     ap.add_argument("--no-gitignore", action="store_true",
                     help="Git の無視対象(.gitignore など)も走査する")
     ap.add_argument("--selftest", action="store_true",
@@ -1878,10 +2134,18 @@ def main(argv=None):
     scanner = FileScanner(args)
     results = []
     missing_paths = []
+    seen = set()
     for path in iter_files(args.paths, args.exclude, missing_paths,
                            use_gitignore=not args.no_gitignore):
         if path.endswith(BACKUP_SUFFIX):
             continue  # --all / --ext / パス直接指定でもバックアップは書き換えない
+        # 同じファイルを2回処理すると、件数が重複し、--backup が修正後の内容で
+        # 上書きされて元の内容を失う(例: 「docs docs/a.md」やシンボリックリンク)
+        real = os.path.realpath(path)
+        if real in seen:
+            continue
+        seen.add(real)
+        guessed = False
         try:
             kind, lang = scanner.classify(path)
             if kind is None:
@@ -1890,6 +2154,7 @@ def main(argv=None):
                 if os.path.splitext(path)[1].lower() in BINARY_EXTS:
                     continue  # --all でもバイナリ拡張子は除外
                 kind, lang = "doc", None
+                guessed = True
             findings, old, new, enc = scanner.scan(path, kind, lang)
             if not (args.fix or args.diff):
                 # diff/fix に使わない行全体は保持しない(大規模ツリーで
@@ -1898,6 +2163,11 @@ def main(argv=None):
             results.append(Result(path, findings, old, new, None, enc, False))
         except SkipFile as ex:
             results.append(Result(path, [], None, None, str(ex), None, False))
+        except BinaryFile as ex:
+            # --all が拾った拡張子不明のファイルは、バイナリでもエラーにしない
+            # (.DS_Store などが1つあるだけで終了コード 2 になるのを防ぐ)
+            results.append(Result(path, [], None, None, str(ex), None,
+                                  not guessed))
         except (IOError, UnicodeDecodeError, LookupError) as ex:
             results.append(Result(path, [], None, None, str(ex), None, True))
 
@@ -1935,7 +2205,13 @@ def main(argv=None):
         if args.diff:
             print_diff(r.path, r.old, r.new, stream)
         if args.fix:
-            apply_fix(r.path, r.new, args.backup, r.enc, stream)
+            # 1ファイルの失敗で残りの修正を止めない
+            try:
+                apply_fix(r.path, r.new, args.backup, r.enc, stream)
+            except (OSError, UnicodeError) as ex:
+                print("エラー: 修正を書き込めません: %s (%s)" % (r.path, ex),
+                      file=sys.stderr)
+                exit_code = 2
 
     return exit_code
 
